@@ -1,0 +1,45 @@
+openapi: 3.1.0
+info:
+  title: Simple Wine BG Agent
+  version: "1.0.0"
+servers:
+  - url: https://bg.simple.example
+paths:
+  /v1/auto_upload:
+    post:
+      operationId: simpleAutoUpload
+      summary: Upload a bottle image, get background removed (optional gray bg).
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+                background:
+                  type: string
+                  description: '"transparent" (default) or hex color like "#f7f7f7"'
+                  default: transparent
+                shadow:
+                  type: boolean
+                  default: true
+                alpha_mode:
+                  type: string
+                  enum: [standard, strong]
+                  default: standard
+              required: [file]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  result_url: { type: string }
+                  width: { type: integer }
+                  height: { type: integer }
+                required: [result_url, width, height]
