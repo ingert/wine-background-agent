@@ -1,5 +1,5 @@
 import os, io, uuid
-from typing import Optional, Literal
+from typing import Literal
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -8,25 +8,40 @@ import numpy as np
 from rembg import remove
 
 app = FastAPI(title="Simple Wine BG Agent", version="1.0.0")
+
+# Root route for Render port check
+@app.get("/")
+def root():
+    return {"status": "running"}
+
+# Health check
 @app.get("/healthz")
 def health_check():
     return {"status": "ok"}
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_headers=["*"], allow_methods=["*"])
+
+app.add_middleware(
+    CORSMiddleware, allow_origins=["*"], allow_headers=["*"], allow_methods=["*"]
+)
+
 FILES_DIR = "files"
 os.makedirs(FILES_DIR, exist_ok=True)
 app.mount("/files", StaticFiles(directory=FILES_DIR), name="files")
 
+# Background removal
 def remove_bg(im: Image.Image, alpha_mode: str="standard") -> Image.Image:
     alpha_matting = alpha_mode in ("standard", "strong")
     am_fg = 280 if alpha_mode == "strong" else 240
     am_bg = 30 if alpha_mode == "strong" else 10
     erode = 20 if alpha_mode == "strong" else 10
-    return remove(im.convert("RGBA"),
-                  alpha_matting=alpha_matting,
-                  alpha_matting_foreground_threshold=am_fg,
-                  alpha_matting_background_threshold=am_bg,
-                  alpha_matting_erode_size=erode)
+    return remove(
+        im.convert("RGBA"),
+        alpha_matting=alpha_matting,
+        alpha_matting_foreground_threshold=am_fg,
+        alpha_matting_background_threshold=am_bg,
+        alpha_matting_erode_size=erode
+    )
 
+# Shadow generator
 def auto_shadow(alpha: Image.Image, w: int, h: int, opacity: float=0.25, blur: int=35, size_scale: float=1.1):
     a = np.array(alpha)
     ys, xs = np.where(a > 0)
@@ -49,6 +64,7 @@ def auto_shadow(alpha: Image.Image, w: int, h: int, opacity: float=0.25, blur: i
     shadow.putalpha(mask)
     return shadow
 
+# Upload endpoint
 @app.post("/v1/auto_upload")
 async def auto_upload(
     file: UploadFile = File(..., description="Billedfil (jpg/png/webp/tiff)"),
@@ -56,7 +72,6 @@ async def auto_upload(
     shadow: bool = Form(True),
     alpha_mode: Literal["standard","strong"] = Form("standard")
 ):
-    # read image
     try:
         data = await file.read()
         im = Image.open(io.BytesIO(data)).convert("RGBA")
@@ -65,7 +80,6 @@ async def auto_upload(
 
     cut = remove_bg(im, alpha_mode=alpha_mode)
 
-    # add soft shadow if wanted
     if shadow:
         W,H = cut.size
         from PIL import Image as PImage
@@ -75,25 +89,24 @@ async def auto_upload(
         base.alpha_composite(cut, (0,0))
         cut = base
 
-    # background
-    from PIL import Image as PImage
     bg_img = None
-    if background and background.lower() != "transparent":
+    if background.lower() != "transparent":
         try:
             color = ImageColor.getrgb(background)
+            from PIL import Image as PImage
             bg_img = PImage.new("RGBA", cut.size, color + (255,))
         except Exception:
             raise HTTPException(400, "background skal være 'transparent' eller en gyldig farve (fx #f7f7f7)")
 
+    from PIL import Image as PImage
     out = cut if bg_img is None else PImage.alpha_composite(bg_img, cut)
 
-    # save
     fname = f"{uuid.uuid4().hex[:8]}.png"
     path = os.path.join(FILES_DIR, fname)
     out.save(path, "PNG")
     return {"result_url": f"/files/{fname}", "width": out.size[0], "height": out.size[1]}
+
 if __name__ == "__main__":
-    import os
     import uvicorn
     port = int(os.environ.get("PORT", 8080))
     uvicorn.run(app, host="0.0.0.0", port=port)
