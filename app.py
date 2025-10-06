@@ -8,6 +8,9 @@ import numpy as np
 from rembg import remove
 
 app = FastAPI(title="Simple Wine BG Agent", version="1.0.0")
+@app.get("/healthz")
+def health_check():
+    return {"status": "ok"}
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_headers=["*"], allow_methods=["*"])
 FILES_DIR = "files"
 os.makedirs(FILES_DIR, exist_ok=True)
