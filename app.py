@@ -9,25 +9,25 @@ from rembg import remove
 
 app = FastAPI(title="Simple Wine BG Agent", version="1.0.0")
 
-# Root + Health check
-@app.get("/")
-@app.get("/healthz")
-def health_check():
-    return {"status": "ok"}
-
-# Enable CORS
+# CORS
 app.add_middleware(
-    CORSMiddleware, allow_origins=["*"], allow_headers=["*"], allow_methods=["*"]
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_headers=["*"],
+    allow_methods=["*"]
 )
 
-# File storage
+# Files directory
 FILES_DIR = "files"
 os.makedirs(FILES_DIR, exist_ok=True)
 app.mount("/files", StaticFiles(directory=FILES_DIR), name="files")
 
-# Background removal
+# Root + healthz routes
+@app.get("/", include_in_schema=False)
+@app.get("/healthz", include_in_schema=False)
+def health_check():
+    return {"status": "ok"}
+
+# Background removal function
 def remove_bg(im: Image.Image, alpha_mode: str="standard") -> Image.Image:
-    alpha_matting = alpha_mode in ("standard", "strong")
-    am_fg = 280 if alpha_mode == "strong" else 240
-    am_bg = 30 if alpha_mode == "strong" else 10
-    erode = 20 if alpha_mode ==_
+    alpha_matting = alp_
