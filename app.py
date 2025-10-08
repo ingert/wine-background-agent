@@ -109,8 +109,3 @@ async def auto_upload(
     path = os.path.join(FILES_DIR, fname)
     out.save(path, "PNG")
     return {"result_url": f"/files/{fname}", "width": out.size[0], "height": out.size[1]}
-
-if __name__ == "__main__":
-    import uvicorn
-    port = int(os.environ.get("PORT", 8080))
-    uvicorn.run(app, host="0.0.0.0", port=port)
