@@ -95,4 +95,4 @@ async def auto_upload(
         output_path = os.path.join(OUTPUT_DIR, output_filename)
         output_image.save(output_path)
 
-        print(f"✅ Processed
+        print(f"✅ Processed file saved at: {output_path}")
