@@ -1,15 +1,18 @@
 import os
 import uuid
-from fastapi import FastAPI, File, UploadFile, Form
+import io
+from fastapi import FastAPI, File, UploadFile, Form, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from rembg import new_session
+from rembg import remove, new_session
 from PIL import Image, ImageOps
+from pathlib import Path
 
-# --- Initialize app ---
+# =========================================================
+# ⚙️ Setup
+# =========================================================
 app = FastAPI(title="Wine Background Agent")
 
-# --- Allow CORS ---
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -18,98 +21,107 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- Directories ---
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
-OUTPUT_DIR = os.path.join(BASE_DIR, "processed")
-os.makedirs(UPLOAD_DIR, exist_ok=True)
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+BASE_DIR = Path(__file__).resolve().parent
+UPLOAD_DIR = BASE_DIR / "uploads"
+PROCESSED_DIR = BASE_DIR / "processed"
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
 
-# --- Lazy load rembg session ---
-rembg_session = None
+session = None  # Lazy model loading
 
-def get_rembg_session():
-    global rembg_session
-    if rembg_session is None:
+
+# =========================================================
+# 🧠 Helper functions
+# =========================================================
+def get_session():
+    """Load the rembg model once per process."""
+    global session
+    if session is None:
         print("⚙️ Loading U2NetP model (this may take a few seconds)...")
-        rembg_session = new_session(model_name="u2netp")
+        session = new_session("u2netp")
         print("✅ Model loaded successfully.")
-    return rembg_session
+    return session
 
-# --- Health check ---
-@app.get("/healthz")
-def health_check():
-    return {"status": "ok"}
 
-# --- Main upload/processing route ---
+def process_image(image_data: bytes, background: str = "transparent") -> Image.Image:
+    """Removes background and applies the given background color or transparency."""
+    input_image = Image.open(io.BytesIO(image_data)).convert("RGBA")
+    session = get_session()
+
+    # Remove background
+    output_image = remove(input_image, session=session).convert("RGBA")
+
+    # Handle background choice
+    if background.lower() != "transparent":
+        bg_color = background if background.startswith("#") else "white"
+        bg = Image.new("RGBA", output_image.size, bg_color)
+        bg.alpha_composite(output_image)
+        output_image = bg
+
+    return output_image
+
+
+# =========================================================
+# 🚀 Routes
+# =========================================================
+@app.get("/")
+async def root():
+    return {"message": "✅ Wine Background Agent is running!"}
+
+
 @app.post("/v1/auto_upload")
 async def auto_upload(
+    request: Request,
     file: UploadFile = File(...),
-    background: str = Form("transparent"),  # 'transparent' or hex color e.g. "#ffffff"
-    shadow: bool = Form(False),
+    background: str = Form("transparent")
 ):
+    """Handles upload, background removal, and saving."""
     try:
-        # Save uploaded file
-        input_id = str(uuid.uuid4())
-        input_path = os.path.join(UPLOAD_DIR, f"{input_id}_{file.filename}")
-        with open(input_path, "wb") as f:
-            f.write(await file.read())
-        print(f"📸 Uploaded file saved at: {input_path}")
+        # Save upload
+        upload_id = str(uuid.uuid4())
+        upload_path = UPLOAD_DIR / f"{upload_id}_{file.filename}"
+        with open(upload_path, "wb") as f:
+            content = await file.read()
+            f.write(content)
+        print(f"📸 Uploaded file saved at: {upload_path}")
 
-        # Open input image
-        input_image = Image.open(input_path).convert("RGBA")
+        # Process
+        output_image = process_image(content, background=background)
 
-        # Remove background
-        session = get_rembg_session()
-        output_image = session.run(input_image)
-
-        # Ensure RGBA
-        output_image = output_image.convert("RGBA")
-
-        # Apply shadow if requested
-        if shadow:
-            shadow_layer = Image.new("RGBA", output_image.size, (0, 0, 0, 0))
-            shadow_border = 20
-            expanded = ImageOps.expand(output_image, border=shadow_border, fill=(0, 0, 0, 80))
-            shadow_layer.paste(expanded, (0, 0), expanded)
-            output_image = Image.alpha_composite(shadow_layer, output_image)
-
-        # Apply background
-        if background.lower() != "transparent":
-            bg_image = Image.new("RGBA", output_image.size, background)
-            output_image = Image.alpha_composite(bg_image, output_image)
-
-        # Save processed image
-        output_id = str(uuid.uuid4())
-        output_filename = f"{output_id}.png"
-        output_path = os.path.join(OUTPUT_DIR, output_filename)
-        output_image.save(output_path)
+        # Save processed file
+        output_filename = f"{upload_id}.png"
+        output_path = PROCESSED_DIR / output_filename
+        output_image.save(output_path, format="PNG")
         print(f"✅ Processed file saved at: {output_path}")
 
-        # Return download URL
-        download_url = f"/download/{output_filename}"
-        return {"status": "processing", "download_url": download_url}
+        # Return public URL
+        download_url = f"{request.base_url}download/{output_filename}"
+        return {"status": "success", "download_url": download_url}
 
     except Exception as e:
         print(f"❌ Error processing file: {e}")
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-# --- Download endpoint ---
-@app.get("/download/{file_name}")
-def download_file(file_name: str):
-    file_path = os.path.join(OUTPUT_DIR, file_name)
-    print(f"🧾 Download requested: {file_path}")
-    if not os.path.exists(file_path):
-        print("⚠️ File not found!")
+
+@app.get("/download/{filename}")
+async def download_file(filename: str):
+    """Serve processed images."""
+    file_path = PROCESSED_DIR / filename
+    if not file_path.exists():
+        print(f"❌ File not found: {file_path}")
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
-    return FileResponse(file_path, media_type="image/png", filename=file_name)
 
-# --- Root route ---
-@app.get("/")
-def root():
-    return {"status": "running"}
+    return FileResponse(
+        file_path,
+        media_type="image/png",
+        filename=filename
+    )
 
-# --- Run locally ---
+
+# =========================================================
+# 🧪 Run locally
+# =========================================================
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app:app", host="127.0.0.1", port=8000, reload=True)
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("app:app", host="0.0.0.0", port=port, reload=True)
