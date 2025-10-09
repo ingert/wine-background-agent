@@ -3,7 +3,7 @@ import uuid
 from fastapi import FastAPI, File, UploadFile, Form, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from rembg import remove
+from rembg import remove, new_session
 from PIL import Image, ImageOps
 
 # --- Initialize app ---
@@ -25,10 +25,24 @@ OUTPUT_DIR = os.path.join(BASE_DIR, "processed")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+# --- Lazy model session ---
+session = None
+
+
+def get_session():
+    global session
+    if session is None:
+        print("⚙️ Loading U2NetP model (this may take a few seconds)...")
+        session = new_session("u2netp")
+        print("✅ Model loaded successfully.")
+    return session
+
+
 # --- Health check ---
 @app.get("/healthz")
 def health_check():
     return {"status": "ok"}
+
 
 # --- Main upload/processing route ---
 @app.post("/v1/auto_upload")
@@ -46,10 +60,13 @@ async def auto_upload(
             f.write(await file.read())
         print(f"📸 Uploaded file saved at: {input_path}")
 
-        # Remove background
+        # Remove background (correct usage for latest rembg)
         input_image = Image.open(input_path).convert("RGBA")
-        output_image = remove(input_image)
-        output_image = output_image.convert("RGBA")
+        session = get_session()
+        output_bytes = remove(input_image.tobytes(), session=session)
+        output_image = Image.open(
+            bytes(output_bytes)
+        ).convert("RGBA")  # ensure proper RGBA handling
 
         # Apply shadow if requested
         if shadow:
@@ -81,6 +98,7 @@ async def auto_upload(
         print(f"❌ Error processing file: {e}")
         return JSONResponse(status_code=500, content={"error": str(e)})
 
+
 # --- Download endpoint ---
 @app.get("/download/{file_name}")
 def download_file(file_name: str):
@@ -93,13 +111,15 @@ def download_file(file_name: str):
 
     return FileResponse(file_path, media_type="image/png", filename=file_name)
 
+
 # --- Root route ---
 @app.get("/")
 def root():
     return {"status": "running"}
 
+
 # --- Run locally ---
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app:app", host="127.0.0.1", port=8000, reload=True)
 
+    uvicorn.run("app:app", host="127.0.0.1", port=8000, reload=True)
