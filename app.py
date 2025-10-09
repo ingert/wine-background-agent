@@ -1,9 +1,9 @@
 import os
 import uuid
-from fastapi import FastAPI, File, UploadFile, Form
+from fastapi import FastAPI, File, UploadFile, Form, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from rembg import new_session
+from rembg import remove
 from PIL import Image, ImageOps
 
 # --- Initialize app ---
@@ -18,23 +18,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- Directories ---
+# --- Local storage setup ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
 OUTPUT_DIR = os.path.join(BASE_DIR, "processed")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-# --- Lazy load rembg session ---
-rembg_session = None
-
-def get_rembg_session():
-    global rembg_session
-    if rembg_session is None:
-        print("⚙️ Loading U2NetP model (this may take a few seconds)...")
-        rembg_session = new_session(model_name="u2netp")
-        print("✅ Model loaded successfully.")
-    return rembg_session
 
 # --- Health check ---
 @app.get("/healthz")
@@ -44,8 +33,9 @@ def health_check():
 # --- Main upload/processing route ---
 @app.post("/v1/auto_upload")
 async def auto_upload(
+    request: Request,
     file: UploadFile = File(...),
-    background: str = Form("transparent"),  # 'transparent' or hex color e.g. "#ffffff"
+    background: str = Form("transparent"),  # 'transparent' or e.g. "#ffffff"
     shadow: bool = Form(False),
 ):
     try:
@@ -56,14 +46,9 @@ async def auto_upload(
             f.write(await file.read())
         print(f"📸 Uploaded file saved at: {input_path}")
 
-        # Open input image
-        input_image = Image.open(input_path).convert("RGBA")
-
         # Remove background
-        session = get_rembg_session()
-        output_image = session.run(input_image)
-
-        # Ensure RGBA
+        input_image = Image.open(input_path).convert("RGBA")
+        output_image = remove(input_image)
         output_image = output_image.convert("RGBA")
 
         # Apply shadow if requested
@@ -74,7 +59,7 @@ async def auto_upload(
             shadow_layer.paste(expanded, (0, 0), expanded)
             output_image = Image.alpha_composite(shadow_layer, output_image)
 
-        # Apply background
+        # Apply background color if not transparent
         if background.lower() != "transparent":
             bg_image = Image.new("RGBA", output_image.size, background)
             output_image = Image.alpha_composite(bg_image, output_image)
@@ -86,9 +71,11 @@ async def auto_upload(
         output_image.save(output_path)
         print(f"✅ Processed file saved at: {output_path}")
 
-        # Return download URL
-        download_url = f"/download/{output_filename}"
-        return {"status": "processing", "download_url": download_url}
+        # Return absolute download URL
+        base_url = str(request.base_url).rstrip("/")
+        download_url = f"{base_url}/download/{output_filename}"
+
+        return {"status": "success", "download_url": download_url}
 
     except Exception as e:
         print(f"❌ Error processing file: {e}")
@@ -99,9 +86,11 @@ async def auto_upload(
 def download_file(file_name: str):
     file_path = os.path.join(OUTPUT_DIR, file_name)
     print(f"🧾 Download requested: {file_path}")
+
     if not os.path.exists(file_path):
         print("⚠️ File not found!")
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
+
     return FileResponse(file_path, media_type="image/png", filename=file_name)
 
 # --- Root route ---
@@ -113,3 +102,4 @@ def root():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("app:app", host="127.0.0.1", port=8000, reload=True)
+
