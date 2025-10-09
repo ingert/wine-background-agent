@@ -26,40 +26,22 @@ OUTPUT_DIR = os.path.join(BASE_DIR, "processed")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# --- Global model session ---
+# --- Lazy model session ---
 session = None
-
 def get_session():
     global session
     if session is None:
-        print("⚙️ Loading U2NetP model at startup (may take a few seconds)...")
-        session = new_session("u2netp")
+        print("⚙️ Loading U2NetP model (this may take a few seconds)...")
+        session = new_session("u2netp")  # smaller & faster
         print("✅ Model loaded successfully.")
     return session
 
-# --- Preload model on startup ---
-@app.on_event("startup")
-def startup_event():
-    get_session()
-
-
-# --- Utility: resize image to max dimension ---
-def resize_image(image: Image.Image, max_size: int = 1024) -> Image.Image:
-    w, h = image.size
-    if max(w, h) > max_size:
-        scale = max_size / max(w, h)
-        new_size = (int(w * scale), int(h * scale))
-        return image.resize(new_size, Image.ANTIALIAS)
-    return image
-
-
-# --- Health check route ---
+# --- Health check ---
 @app.get("/healthz")
 def health_check():
     return {"status": "ok"}
 
-
-# --- Main upload/processing route ---
+# --- Main upload/processing endpoint ---
 @app.post("/v1/auto_upload")
 async def auto_upload(
     file: UploadFile = File(...),
@@ -71,28 +53,60 @@ async def auto_upload(
         # Save uploaded file
         input_id = str(uuid.uuid4())
         input_path = os.path.join(UPLOAD_DIR, f"{input_id}_{file.filename}")
-
         with open(input_path, "wb") as f:
             f.write(await file.read())
-
         print(f"📸 Uploaded file saved at: {input_path}")
 
-        # Open and resize image
+        # Open image
         input_image = Image.open(input_path).convert("RGBA")
-        input_image = resize_image(input_image, max_size=1024)
 
-        # Remove background
+        # Remove background using lazy-loaded session
         output_image = remove(input_image, session=get_session())
 
-        # Optional shadow (simple drop shadow)
+        # Optional shadow (simple drop shadow effect)
         if shadow:
             shadow_layer = ImageOps.expand(output_image, border=20, fill=(0, 0, 0, 80))
             output_image = Image.alpha_composite(shadow_layer, output_image)
+
+        # Optional background color
+        if background.lower() != "transparent":
+            bg = Image.new("RGBA", output_image.size, background)
+            output_image = Image.alpha_composite(bg, output_image)
 
         # Save processed image
         output_id = str(uuid.uuid4())
         output_filename = f"{output_id}.png"
         output_path = os.path.join(OUTPUT_DIR, output_filename)
         output_image.save(output_path)
-
         print(f"✅ Processed file saved at: {output_path}")
+
+        # Return download URL
+        download_url = f"/download/{output_filename}"
+        return {"status": "success", "download_url": download_url}
+
+    except Exception as e:
+        print(f"❌ Error processing file: {e}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+# --- Download endpoint ---
+@app.get("/download/{file_name}")
+def download_file(file_name: str):
+    file_path = os.path.join(OUTPUT_DIR, file_name)
+    print(f"🧾 Download requested: {file_path}")
+
+    if not os.path.exists(file_path):
+        print("⚠️ File not found!")
+        return JSONResponse(status_code=404, content={"detail": "Not Found"})
+
+    return FileResponse(file_path, media_type="image/png", filename=file_name)
+
+# --- Root route ---
+@app.get("/")
+def root():
+    return {"status": "running"}
+
+# --- Run locally ---
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 10000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
