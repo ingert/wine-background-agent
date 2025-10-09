@@ -1,6 +1,7 @@
-import io
+import os
+import uuid
 from fastapi import FastAPI, File, UploadFile, Form
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from rembg import remove, new_session
 from PIL import Image, ImageOps
@@ -17,46 +18,46 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# --- Directories ---
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
+OUTPUT_DIR = os.path.join(BASE_DIR, "processed")
+
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
 # --- Global model session ---
 session = None
 
 def get_session():
     global session
     if session is None:
-        print("⚙️ Loading U2NetP model (smaller & faster)...")
+        print("⚙️ Loading U2NetP model at startup (may take a few seconds)...")
         session = new_session("u2netp")
         print("✅ Model loaded successfully.")
     return session
 
-def resize_image(image: Image.Image, max_size=1024):
-    """Resize image to max dimension to prevent timeouts."""
-    if max(image.size) > max_size:
-        image.thumbnail((max_size, max_size))
+# --- Preload model on startup ---
+@app.on_event("startup")
+def startup_event():
+    get_session()
+
+
+# --- Utility: resize image to max dimension ---
+def resize_image(image: Image.Image, max_size: int = 1024) -> Image.Image:
+    w, h = image.size
+    if max(w, h) > max_size:
+        scale = max_size / max(w, h)
+        new_size = (int(w * scale), int(h * scale))
+        return image.resize(new_size, Image.ANTIALIAS)
     return image
 
-def apply_background(image: Image.Image, bg_color: str):
-    """Apply background color to an RGBA image."""
-    if bg_color.lower() == "transparent":
-        return image  # no change
-    # Hex color support
-    if bg_color.startswith("#") and len(bg_color) == 7:
-        bg = Image.new("RGBA", image.size, bg_color + "FF")
-    elif bg_color.lower() == "white":
-        bg = Image.new("RGBA", image.size, (255, 255, 255, 255))
-    else:
-        bg = Image.new("RGBA", image.size, (0, 0, 0, 0))
-    return Image.alpha_composite(bg, image)
-
-def convert_to_rgba(image: Image.Image):
-    """Ensure image is RGBA (supports JPEG→PNG conversion)."""
-    if image.mode != "RGBA":
-        return image.convert("RGBA")
-    return image
 
 # --- Health check route ---
 @app.get("/healthz")
 def health_check():
     return {"status": "ok"}
+
 
 # --- Main upload/processing route ---
 @app.post("/v1/auto_upload")
@@ -64,37 +65,34 @@ async def auto_upload(
     file: UploadFile = File(...),
     background: str = Form("transparent"),
     shadow: bool = Form(False),
+    alpha_mode: str = Form("standard"),
 ):
     try:
-        # Read uploaded file into memory
-        file_bytes = await file.read()
-        input_image = Image.open(io.BytesIO(file_bytes))
-        input_image = convert_to_rgba(input_image)
-        input_image = resize_image(input_image)
+        # Save uploaded file
+        input_id = str(uuid.uuid4())
+        input_path = os.path.join(UPLOAD_DIR, f"{input_id}_{file.filename}")
+
+        with open(input_path, "wb") as f:
+            f.write(await file.read())
+
+        print(f"📸 Uploaded file saved at: {input_path}")
+
+        # Open and resize image
+        input_image = Image.open(input_path).convert("RGBA")
+        input_image = resize_image(input_image, max_size=1024)
 
         # Remove background
         output_image = remove(input_image, session=get_session())
 
-        # Optional shadow
+        # Optional shadow (simple drop shadow)
         if shadow:
             shadow_layer = ImageOps.expand(output_image, border=20, fill=(0, 0, 0, 80))
             output_image = Image.alpha_composite(shadow_layer, output_image)
 
-        # Apply background color
-        output_image = apply_background(output_image, background)
+        # Save processed image
+        output_id = str(uuid.uuid4())
+        output_filename = f"{output_id}.png"
+        output_path = os.path.join(OUTPUT_DIR, output_filename)
+        output_image.save(output_path)
 
-        # Save output to memory as PNG
-        output_bytes = io.BytesIO()
-        output_image.save(output_bytes, format="PNG")
-        output_bytes.seek(0)
-
-        return StreamingResponse(output_bytes, media_type="image/png")
-
-    except Exception as e:
-        print(f"❌ Error processing file: {e}")
-        return JSONResponse(status_code=500, content={"error": str(e)})
-
-# --- Root route ---
-@app.get("/")
-def root():
-    return {"status": "running"}
+        print(f"✅ Processed
